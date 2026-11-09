@@ -147,7 +147,27 @@ def merge_inbox(config: dict, remote_items: list[dict]) -> list[str]:
     return added
 
 
-def sync(config: dict, timeout: int = 8) -> dict:
+MIRROR_TEMPLATE = "https://cdn.jsdelivr.net/gh/{repo}@{branch}/announcements.json"
+
+
+def mirror_url(url: str) -> str:
+    """把 raw.githubusercontent.com 地址换成 jsDelivr 镜像（国内更容易通）."""
+    lowered = url.casefold()
+    if "raw.githubusercontent.com" not in lowered:
+        return ""
+    try:
+        tail = url.split("raw.githubusercontent.com/", 1)[1]
+        parts = tail.split("/")
+        owner, repo, branch = parts[0], parts[1], parts[2]
+        path = "/".join(parts[3:])
+    except (IndexError, ValueError):
+        return ""
+    if path.split("/")[-1] != "announcements.json":
+        return ""
+    return MIRROR_TEMPLATE.format(repo=f"{owner}/{repo}", branch=branch)
+
+
+def sync(config: dict, timeout: int = 10) -> dict:
     """按设置拉一次远端公告；失败不抛异常，返回状态给界面显示."""
     update = config.setdefault("update", {})
     if not update.get("remote_enabled", True):
@@ -155,9 +175,22 @@ def sync(config: dict, timeout: int = 8) -> dict:
     url = (update.get("remote_url") or "").strip()
     if not url:
         return {"ok": False, "reason": "没有配置远端地址", "added": []}
-    try:
-        items = fetch_remote(url, timeout=timeout)
-    except (OSError, ValueError, TimeoutError) as exc:
-        return {"ok": False, "reason": f"拉取失败：{exc}", "added": []}
-    added = merge_inbox(config, items)
-    return {"ok": True, "reason": f"远端公告 {len(items)} 条", "added": added}
+    candidates = [url]
+    backup = mirror_url(url)
+    if backup:
+        candidates.append(backup)
+    last_error = ""
+    for candidate in candidates:
+        try:
+            items = fetch_remote(candidate, timeout=timeout)
+        except (OSError, ValueError, TimeoutError) as exc:
+            last_error = f"{candidate} → {exc}"
+            continue
+        if not items:
+            last_error = f"{candidate} → 内容为空"
+            continue
+        added = merge_inbox(config, items)
+        return {"ok": True, "reason": f"远端公告 {len(items)} 条", "added": added,
+                "source": candidate}
+    return {"ok": False, "reason": f"拉取失败：{last_error}", "added": []}
+
