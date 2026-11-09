@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import copy
 import os
 import queue
 import sys
@@ -13,8 +14,8 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from . import (
-    APP_NAME_CN, HOMEPAGE, __version__, announcements, config, desktop, engine,
-    icons, shortcuts, updater,
+    APP_NAME_CN, HOMEPAGE, __version__, announcements, config, desktop, downloads, engine,
+    health, icons, layout, library, shortcuts, ui_tools, updater,
 )
 from .filters import clean_display_name, normalize_name
 from .models import AppEntry, ScanOptions
@@ -45,6 +46,7 @@ class DeskScoutApp(tk.Tk):
         super().__init__()
 
         self.cfg = config.load()
+        icons.set_icon_style(str(config.get(self.cfg, "appearance.icon_style", "native")))
         self.entries: list[AppEntry] = []
         self.desktop_items = []
         self.capacity: dict = {}
@@ -82,6 +84,7 @@ class DeskScoutApp(tk.Tk):
         self.after(80, self._drain_queue)
         self.after(900, self._auto_update_check)
         self.after(1500, self._startup_announcement)
+        self.after(4200, lambda: ui_tools.sync_announcements(self, silent=True))
         if self.cfg["ui"].get("auto_scan_on_start", True):
             self.after(150, self.start_scan)
         else:
@@ -275,6 +278,7 @@ class DeskScoutApp(tk.Tk):
         self.tree.tag_configure("has", foreground=OK_GREEN)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda _event: self.open_location())
+        self.tree.bind("<Button-3>", self._show_row_menu)
 
         detail = tk.Frame(tab, bg=SUBTLE, height=92, highlightthickness=1,
                           highlightbackground=BORDER)
@@ -316,6 +320,10 @@ class DeskScoutApp(tk.Tk):
                    command=self.invert_selection).pack(side="right", padx=(8, 0))
         ttk.Button(actions, text="导出清单", style="Ghost.TButton",
                    command=self.export_csv).pack(side="right", padx=(8, 0))
+        ttk.Button(actions, text="软件体检", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_health(self)).pack(side="right", padx=(8, 0))
+        ttk.Button(actions, text="下载入口", style="Ghost.TButton",
+                   command=self.open_download).pack(side="right", padx=(8, 0))
 
     # --------------------------------------------------------------- 桌面现状
     def _build_desktop_tab(self) -> None:
@@ -453,11 +461,10 @@ class DeskScoutApp(tk.Tk):
         tips_box.pack(fill="both", expand=True, pady=(10, 0))
         tips = tk.Label(
             tips_box,
-            text=("1. 首次启动会自动扫描，也可以用 F5 重新扫描。\n"
-                  "2. 在「已安装软件」页按来源 / 类别筛选，Ctrl 或 Shift 多选。\n"
-                  "3. 点「为选中项创建快捷方式」，自动检查空位后直接创建，不再二次确认。\n"
-                  "4. 桌面已有快捷方式的软件会自动跳过，不会重复创建。\n"
-                  "5. 设置里的扫描范围与过滤规则会在下一次扫描生效。"),
+            text=("1. 首次启动自动扫描，F5 重新扫描；右键可收藏、屏蔽、打开下载入口。\n"
+                  "2. 桌面已有快捷方式的软件自动跳过；空位不足时静默放进子文件夹。\n"
+                  "3. 收藏 / 屏蔽 / 自启备份 / 桌面快照都存在本机，升级版本不会丢。\n"
+                  "4. 体检、自启、残留清理都在「软件库与列表」里，随时可回退。"),
             font=(FONT, 9), bg=CARD, fg=MUTED, justify="left", anchor="nw",
         )
         tips.pack(anchor="w", fill="both")
@@ -510,15 +517,44 @@ class DeskScoutApp(tk.Tk):
         ttk.Button(actions, text="重置设置", style="Ghost.TButton",
                    command=self.reset_settings).pack(side="left", padx=8)
 
+        tools_box = ttk.LabelFrame(right, text="软件库与列表（收藏 / 屏蔽 / 便携库 / 自启 / 布局 / 清理）",
+                                   style="Section.TLabelframe", padding=10)
+        tools_box.pack(fill="x", pady=(10, 0))
+        row1 = tk.Frame(tools_box, bg=CARD)
+        row1.pack(fill="x")
+        self.fav_button = ttk.Button(row1, text="收藏夹", style="Ghost.TButton",
+                                     command=lambda: ui_tools.show_favorites(self))
+        self.fav_button.pack(side="left")
+        self.block_button = ttk.Button(row1, text="屏蔽名单", style="Ghost.TButton",
+                                       command=lambda: ui_tools.show_blocklist(self))
+        self.block_button.pack(side="left", padx=6)
+        ttk.Button(row1, text="便携软件库", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_portable(self)).pack(side="left")
+        row2 = tk.Frame(tools_box, bg=CARD)
+        row2.pack(fill="x", pady=(6, 0))
+        ttk.Button(row2, text="开机自启", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_autostart(self)).pack(side="left")
+        ttk.Button(row2, text="桌面布局", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_layout(self)).pack(side="left", padx=6)
+        ttk.Button(row2, text="卸载残留", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_cleanup(self)).pack(side="left")
+        ttk.Button(row2, text="图标风格", style="Ghost.TButton",
+                   command=lambda: ui_tools.show_icon_style(self)).pack(side="left", padx=6)
+        announce_row = tk.Frame(tools_box, bg=CARD)
+        announce_row.pack(fill="x", pady=(6, 0))
+        self.var_remote_announce = tk.BooleanVar()
+        ttk.Checkbutton(announce_row, text="云端公告兜底（远端 announcements.json）",
+                        variable=self.var_remote_announce, style="Card.TCheckbutton",
+                        command=self.save_settings).pack(side="left")
+        ttk.Button(announce_row, text="立即同步", style="Ghost.TButton",
+                   command=lambda: ui_tools.sync_announcements(self)).pack(side="left", padx=6)
+
         about_box = ttk.LabelFrame(right, text="关于", style="Section.TLabelframe", padding=12)
         about_box.pack(fill="both", expand=True, pady=(10, 0))
         self.about_label = tk.Label(
             about_box,
-            text=(f"DeskScout 桌面应用管家 v{__version__}\n"
-                  "• 纯本地运行：扫描结果只留在本机，工具不联网上传任何清单\n"
+            text=(f"DeskScout 桌面应用管家 v{__version__} · 纯本地运行，扫描结果只留在本机\n"
                   "• 只读取安装信息与快捷方式，不修改已安装软件\n"
-                  "• 创建快捷方式默认不再二次确认，可在上方设置里重新开启\n"
-                  "• 图标取自 Windows Shell，商店应用同样显示原始图标\n"
                   f"• 项目主页：{HOMEPAGE}"),
             font=(FONT, 9), bg=CARD, fg=MUTED, justify="left", anchor="w",
         )
@@ -549,6 +585,12 @@ class DeskScoutApp(tk.Tk):
 
         update = self.cfg.get("update", {})
         self.var_auto_update.set(bool(update.get("auto_check", True)))
+        self.var_remote_announce.set(bool(update.get("remote_enabled", True)))
+        ui_tools.refresh_library_counts(self)
+
+    def save_config(self) -> bool:
+        """只把内存里的 cfg 落盘（收藏/屏蔽/自启备份等由工具对话框直接改 cfg）."""
+        return config.save(self.cfg)
 
     def save_settings(self, *_args) -> None:
         if not self._ui_ready:
@@ -572,12 +614,14 @@ class DeskScoutApp(tk.Tk):
         }
         self.cfg["ui"]["auto_scan_on_start"] = self.var_auto_scan.get()
         self.cfg["update"]["auto_check"] = self.var_auto_update.get()
+        self.cfg["update"]["remote_enabled"] = self.var_remote_announce.get()
         config.save(self.cfg)
 
     def reset_settings(self) -> None:
         if not messagebox.askyesno("重置设置", "确定恢复默认设置吗？已安装的快捷方式不会被删除。", parent=self):
             return
-        self.cfg = config.DEFAULTS.copy()
+        self.cfg = copy.deepcopy(config.DEFAULTS)
+        self.cfg["update"]["inbox"] = self.cfg["update"].get("inbox", [])
         config.save(self.cfg)
         self._apply_settings_to_ui()
         self._set_status("设置已恢复默认")
@@ -635,6 +679,7 @@ class DeskScoutApp(tk.Tk):
             report = engine.scan_all(
                 options, items,
                 lambda message, percent: self.queue.put(("progress", message, percent)),
+                config=self.cfg,
             )
             self.queue.put(("scan_done", report, items, capacity))
         except Exception as exc:  # 扫描失败不应让界面崩溃
@@ -663,6 +708,15 @@ class DeskScoutApp(tk.Tk):
         )
         if stats:
             self.count_label.configure(text=stats)
+        # 收藏条目跟着扫描结果刷新：还在的更新版本，卸载的保留信息
+        try:
+            library.sync_favorites(self.cfg, self.entries)
+            config.save(self.cfg)
+        except (OSError, ValueError):
+            pass
+        ui_tools.refresh_library_counts(self)
+        if report.blocked_count:
+            self._set_status(self.status_text.cget("text") + f" · 已屏蔽 {report.blocked_count} 条")
 
     # -------------------------------------------------------------- 列表渲染
     def _filtered_entries(self) -> list[AppEntry]:
@@ -672,6 +726,8 @@ class DeskScoutApp(tk.Tk):
         only_pending = self.pending_var.get()
         rows = []
         for entry in self.entries:
+            if library.is_blocked(self.cfg, entry):
+                continue
             if text:
                 haystack = f"{entry.name} {entry.publisher} {entry.target} {entry.source_label}".casefold()
                 if text not in haystack:
@@ -690,10 +746,13 @@ class DeskScoutApp(tk.Tk):
         rows.sort(key=self._sort_key, reverse=self.sort_reverse)
         self._render_rows(rows)
         total = len(self.entries)
-        pending = sum(1 for e in self.entries if e.launchable and not e.has_shortcut)
+        blocked = sum(1 for entry in self.entries if library.is_blocked(self.cfg, entry))
+        pending = sum(1 for e in self.entries if e.launchable and not e.has_shortcut
+                      and not library.is_blocked(self.cfg, e))
         with_shortcut = sum(1 for e in self.entries if e.has_shortcut)
         self.summary_label.configure(
             text=f"共 {total} 个应用 · 已有桌面快捷方式 {with_shortcut} · 待创建 {pending}"
+            + (f" · 已屏蔽 {blocked}" if blocked else "")
         )
         if total:
             self.count_label.configure(text=f"当前显示 {len(rows)} / {total}")
@@ -859,6 +918,89 @@ class DeskScoutApp(tk.Tk):
         self.clipboard_clear()
         self.clipboard_append(entry.target)
         self._set_status("已复制启动路径")
+
+    # ------------------------------------------------------- 收藏 / 屏蔽 / 下载
+    def _show_row_menu(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if iid and iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="收藏这个软件", command=self.favorite_selected)
+        menu.add_command(label="屏蔽这个软件（扫描里隐藏）", command=self.block_selected)
+        menu.add_separator()
+        menu.add_command(label="打开下载 / 官方入口", command=self.open_download)
+        menu.add_command(label="打开文件位置", command=self.open_location)
+        menu.add_command(label="复制启动路径", command=self.copy_target)
+        menu.add_separator()
+        menu.add_command(label="为选中项创建快捷方式", command=self.create_selected)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def favorite_selected(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            messagebox.showinfo("提示", "先在列表里选中要收藏的软件。", parent=self)
+            return
+        added = 0
+        for entry in entries:
+            if library.add_favorite(self.cfg, entry):
+                added += 1
+        config.save(self.cfg)
+        ui_tools.refresh_library_counts(self)
+        self._set_status(f"已收藏 {added} 个（已存在的不重复添加）" if added else "这些软件已经在收藏夹里")
+
+    def block_selected(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            messagebox.showinfo("提示", "先在列表里选中要屏蔽的软件。", parent=self)
+            return
+        if not messagebox.askyesno("屏蔽确认",
+                                   f"屏蔽 {len(entries)} 个软件？屏蔽后它们不再出现在扫描结果，"
+                                   "可在「屏蔽名单」里随时解除。", parent=self):
+            return
+        for entry in entries:
+            library.add_block(self.cfg, entry, reason="主界面右键屏蔽")
+        config.save(self.cfg)
+        ui_tools.refresh_library_counts(self)
+        self.refresh_view()
+        self._set_status(f"已屏蔽 {len(entries)} 个软件")
+
+    def open_download(self) -> None:
+        entry = self._detail_entry
+        if entry is None:
+            entries = self._selected_entries()
+            entry = entries[0] if entries else None
+        if entry is None:
+            messagebox.showinfo("提示", "先选中一个软件。", parent=self)
+            return
+        links = downloads.links_for(entry)
+        if not links:
+            messagebox.showinfo("提示", "没有找到可用的下载入口。", parent=self)
+            return
+        if len(links) == 1:
+            downloads.open_link(links[0][1])
+            self._set_status(f"已打开{links[0][0]}")
+            return
+        win = tk.Toplevel(self)
+        win.title(f"{entry.name} · 下载入口")
+        win.configure(bg=CARD)
+        win.geometry("520x260")
+        win.transient(self)
+        tk.Label(win, text=entry.name, font=(FONT, 12, "bold"), bg=CARD, fg=TEXT).pack(
+            anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="选择一个入口打开（商店应用会进入 Microsoft Store 搜索页）",
+                 font=(FONT, 9), bg=CARD, fg=MUTED).pack(anchor="w", padx=18)
+        for label, url in links:
+            row = tk.Frame(win, bg=CARD)
+            row.pack(fill="x", padx=18, pady=6)
+            ttk.Button(row, text=label, style="Ghost.TButton",
+                       command=lambda u=url: (downloads.open_link(u), win.destroy())).pack(side="left")
+            tk.Label(row, text=url, font=(FONT, 9), bg=CARD, fg=MUTED).pack(side="left", padx=8)
+
+    def _refresh_library_buttons(self) -> None:
+        ui_tools.refresh_library_counts(self)
 
     # ------------------------------------------------------------ 桌面现状
     def refresh_desktop(self) -> None:

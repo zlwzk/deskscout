@@ -272,12 +272,17 @@ def _entry_from_uninstall_key(key, subkey_name: str, root, root_path: str) -> Ap
         category = "game"
 
     source_url = ""
+    homepage = ""
     if url_info:
         from .provenance import repo_from_text
 
         source_url = repo_from_text(url_info)
         if source_url and not publisher:
             publisher = source_url
+        if not source_url and url_info.startswith(("http://", "https://")):
+            homepage = url_info
+    if not source_url and homepage and "github.com" in homepage.casefold():
+        source_url, homepage = homepage, ""
 
     return AppEntry(
         key=f"reg:{root_path}\\{subkey_name}",
@@ -293,6 +298,7 @@ def _entry_from_uninstall_key(key, subkey_name: str, root, root_path: str) -> Ap
         target=target,
         working_dir=os.path.dirname(target) if target else "",
         source_url=source_url,
+        homepage=homepage,
         size_bytes=estimated_kb * 1024,
         invalid=invalid,
         note=note,

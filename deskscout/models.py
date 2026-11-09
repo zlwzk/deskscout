@@ -39,7 +39,10 @@ class AppEntry:
     arguments: str = ""
     working_dir: str = ""
     source_url: str = ""
+    homepage: str = ""
     size_bytes: int = 0
+    last_used: str = ""            # ISO 时间，来自 UserAssist / 文件访问时间
+    usage_source: str = ""         # userassist / atime / ""
     shortcut_name: str = ""
     invalid: bool = False
     note: str = ""
@@ -108,6 +111,7 @@ class ScanReport:
     filtered_count: int = 0
     merged_count: int = 0
     github_count: int = 0
+    blocked_count: int = 0
     elapsed_ms: int = 0
     source_stats: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)

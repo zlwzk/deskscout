@@ -1,10 +1,14 @@
-"""应用内更新公告：每个版本发布时把说明内置到程序里，离线也能看.
+"""应用内更新公告：正文随程序内置，离线也能看；同时可拉取远端 announcements.json.
 
 config["update"]["inbox"] 保存用户收到过的公告，形成应用内“收件箱”；
 config["update"]["last_seen_version"] 用来判断是否需要在升级后弹一次窗。
+远端只做“兜底/追加”：程序内已有的版本永远以本地正文为准，不发新版也能推一条通知。
 """
 
 from __future__ import annotations
+
+import json
+import urllib.request
 
 ANNOUNCEMENTS: dict[str, str] = {
     "1.0.0": """DeskScout v1.0.0 · 桌面应用管家 首个正式版
@@ -41,6 +45,27 @@ ANNOUNCEMENTS: dict[str, str] = {
 · 扫描结果里新增「GitHub 项目」统计，发布者一栏直接可点开项目主页
 · 快捷方式图标统一缓存成 ICO，桌面不会再出现通用文件图标
 · 商店应用过滤更狠：shell 扩展、分享宿主、后台服务不再混进列表""",
+    "1.2.0": """DeskScout v1.2.0 · 体检、守护与库管理
+
+新增
+· 软件体检卡片：装了多少、占多大、多久没打开、谁是同一家的套件，一张卡片看完
+· 桌面布局守护：记录一次“理想桌面”，被新装软件挤乱后一键把图标位置原样还原
+· 卸载残留清理：比对“注册表有、目录没了”和“目录还在、注册表没了”，默认只勾安全项，删注册表前自动导出 .reg 备份
+· 便携软件库：绿色软件目录纳入库管理，导出 portable.json（相对路径），新机器一键重建全部快捷方式
+· 开机自启四路管理：注册表 Run、启动文件夹、计划任务、服务一次列全，标明“近期新增/临时目录/脚本启动”，可禁用也可还原
+· 图标统一风格：原图 / 圆角底 / 单色蒙版三选一，桌面看起来像一套系统
+· 收藏夹：收藏的软件即使被卸载也保留名称、版本、官网与项目地址，方便重新下载；取消收藏即移出
+· 屏蔽名单：不想看到的软件一键屏蔽，扫描结果里不再出现，随时可解除
+· 应用下载入口：商店应用给商店搜索页，开源项目给 Releases，其余给官网，重装只差一次点击
+· 桌面热力图：按最近使用时间给桌面图标标色，一眼看出哪些是长期没动过的僵尸快捷方式
+· 公告云端化：程序内公告优先，远端 announcements.json 兜底，不发新版也能推通知
+· CLI 增强：--scan --json 新增 --diff，对比上次扫描输出新增/消失的软件
+
+优化
+· 扫描阶段就应用屏蔽名单，被屏蔽的软件不再计入统计，也不再拖慢界面渲染
+· 收藏、屏蔽、自启禁用记录、桌面快照全部落在 %APPDATA%\\DeskScout，配置改为原子写入并保留 config.json.bak
+· 体积统计有缓存（按目录 mtime），第一次体检略慢，之后几乎零成本
+· 公告只在版本变化时弹一次，关掉后进“公告收件箱”随时回看""",
 }
 
 
@@ -52,5 +77,87 @@ def title_for(version: str) -> str:
     return f"DeskScout v{version} 更新公告"
 
 
+def _version_key(version: str):
+    parts = []
+    for piece in str(version).split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
 def latest_version() -> str:
-    return max(ANNOUNCEMENTS, key=lambda v: tuple(int(p) for p in v.split(".") if p.isdigit()) or (0,))
+    return max(ANNOUNCEMENTS, key=_version_key)
+
+
+def fetch_remote(url: str, timeout: int = 8) -> list[dict]:
+    """读取远端 announcements.json：支持数组或 {"announcements": [...]}。"""
+    if not url:
+        return []
+    request = urllib.request.Request(url, headers={"User-Agent": "DeskScout"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        raw = response.read().decode("utf-8", "ignore")
+    data = json.loads(raw)
+    items = data.get("announcements", []) if isinstance(data, dict) else data
+    result = []
+    if not isinstance(items, list):
+        return result
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        version = str(item.get("version", "")).strip()
+        if not version:
+            continue
+        notes = item.get("notes") or item.get("body") or ""
+        result.append({
+            "version": version,
+            "title": item.get("title") or title_for(version),
+            "date": item.get("date", ""),
+            "notes": notes,
+            "remote": True,
+        })
+    return result
+
+
+def merge_inbox(config: dict, remote_items: list[dict]) -> list[str]:
+    """把远端公告并入收件箱；返回本次新增的版本号列表（按新→旧）."""
+    update = config.setdefault("update", {})
+    inbox = update.get("inbox") or []
+    known = {str(item.get("version", "")) for item in inbox}
+    added = []
+    for item in remote_items:
+        version = item.get("version", "")
+        body = notes_for(version)
+        if version in known:
+            continue
+        if not body:
+            body = (item.get("notes") or "").strip()
+        if not body:
+            continue
+        inbox.append({
+            "version": version,
+            "title": item.get("title") or title_for(version),
+            "date": item.get("date", ""),
+            "notes": body,
+            "remote": bool(item.get("remote")),
+        })
+        known.add(version)
+        added.append(version)
+    update["inbox"] = sorted(inbox, key=lambda item: _version_key(str(item.get("version", ""))),
+                             reverse=True)
+    return added
+
+
+def sync(config: dict, timeout: int = 8) -> dict:
+    """按设置拉一次远端公告；失败不抛异常，返回状态给界面显示."""
+    update = config.setdefault("update", {})
+    if not update.get("remote_enabled", True):
+        return {"ok": False, "reason": "已在设置里关闭云端公告", "added": []}
+    url = (update.get("remote_url") or "").strip()
+    if not url:
+        return {"ok": False, "reason": "没有配置远端地址", "added": []}
+    try:
+        items = fetch_remote(url, timeout=timeout)
+    except (OSError, ValueError, TimeoutError) as exc:
+        return {"ok": False, "reason": f"拉取失败：{exc}", "added": []}
+    added = merge_inbox(config, items)
+    return {"ok": True, "reason": f"远端公告 {len(items)} 条", "added": added}

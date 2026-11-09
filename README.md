@@ -1,12 +1,14 @@
 # DeskScout · 桌面应用管家
 
-> 扫一遍本机，把该在桌面上的软件补齐。全程本地运行，不上传任何数据。
+> 扫一遍本机，把该在桌面上的软件补齐；顺手体检、守护布局、清残留、管自启。全程本地运行，不上传任何数据。
 
-DeskScout 是一个 Windows 桌面小工具：它用多种方式把本机真正安装的软件找出来，
-自动排除 Microsoft 系统组件、运行库、补丁和驱动，但保留 Microsoft Store 里自行安装的应用；
-随后对照桌面已有的快捷方式，只把缺的那些补到桌面——空位不够时自动退到子文件夹，不再反复弹窗打扰。
+DeskScout 是一个 Windows 小工具：用多种方式找出本机真正安装的软件，自动排除 Microsoft 系统组件、运行库、补丁和驱动，
+但保留 Microsoft Store 里自行安装的应用；对照桌面已有快捷方式，只补缺的那些——空位不够时静默退到子文件夹，不再反复弹窗打扰。
 
-![版本](https://img.shields.io/badge/version-1.1.0-2f6feb)
+到了 v1.2.0，它不只是“建快捷方式的”，还多了四件日常真正会用到的事：**看得懂的软件体检**、**桌面布局守护**、
+**卸载残留清理**、**开机自启四路管理**；再加上收藏、屏蔽、便携软件库、统一图标风格与一键重装入口。
+
+![版本](https://img.shields.io/badge/version-1.2.0-2f6feb)
 ![平台](https://img.shields.io/badge/platform-Windows%2010%2F11-1f2430)
 ![依赖](https://img.shields.io/badge/dependencies-%E6%A0%87%E5%87%86%E5%BA%93%E5%8D%B3%E5%8F%AF-12805c)
 
@@ -21,36 +23,94 @@ DeskScout 是一个 Windows 桌面小工具：它用多种方式把本机真正�
 | 把所有 AppX 都扫进来 | 系统框架、驱动包、语言包混进来，列表全是噪音 |
 | 一键批量建快捷方式 | 桌面上重复一堆，还把桌面塞满 |
 | 图标只认 .ico / ExtractIconExW | 商店应用和部分安装包只剩一张白纸图标 |
+| “优化大师”式清理 | 不敢点：不知道它删了什么，也没有备份 |
 
-DeskScout 的做法是多源交叉 + 逐条判定 + 名称去重 + 目录归并，图标走 Windows Shell 原生图像接口，
-并且先算桌面还剩多少格，再一次性把缺的补齐。
+DeskScout 的做法是多源并行扫描 + 逐条判定 + 名称去重 + 目录归并；图标走 Windows Shell 原生图像接口；
+所有“会改系统”的动作（建快捷方式、清残留、禁自启、还原布局）都先给你看清楚、留好退路。
 
 ## 功能
 
-- **五种扫描来源**：注册表卸载项（HKLM / WOW6432Node / HKCU）、开始菜单、Microsoft Store、Steam 库、自定义目录（绿色软件）。
-- **不误扫**：过滤卸载器、更新器、崩溃上报、帮助文档、官网链接、运行库、驱动、KB 补丁、Windows 自带工具；名称里的版本号、位数、别名后缀会被清洗后再去重。
-- **商店应用照扫**：Get-StartApps 与 Get-AppxPackageManifest 双路合并，开始菜单没有入口的应用也会用清单补齐；shell 扩展、分享宿主、后台服务（extend / contextmenu / sharehost / service / appext 之类）直接丢掉。
-- **图标一定是软件自己的**：SHCreateItemFromParsingName + IShellItemImageFactory 取 Shell 图像，exe、.lnk、shell:AppsFolder 下的 AUMID 全部有效；取不到才退回 ExtractIconExW，最后才是首字母色块。快捷方式写入前把图标缓存成多尺寸 .ico，桌面不会出现通用文件图标。
-- **发布者识别**：从 NTFS 下载来源（Zone.Identifier 的 ReferrerUrl）、exe 版本资源、注册表链接里认出 GitHub 项目，发布者一栏直接写成 https://github.com/owner/repo；认不出来就留空，不做同名猜测。
-- **桌面体检**：统计当前用户桌面 + 公共桌面的图标数、失效快捷方式、重复项，并按屏幕分辨率算出手动排列的图标网格容量。
-- **一次点完**：创建前自动检查空位，够就直接建；不够就静默回落到桌面上的「新建快捷方式」子文件夹，并在完成后一次性说明。需要复核的话，可在设置里重新打开「创建前再弹一次确认」。
-- **已有快捷方式自动排除**：桌面已经有的不再重复创建。
-- **更新公告收件箱**：每次发版的说明内置在程序里，升级后第一次启动弹一次，之后可在「设置 → 公告收件箱」离线回看历史版本。
-- **自动更新**：启动时静默检查 GitHub Release，有新版本可在应用内下载并自动替换重启。
-- **零依赖**：只用 Python 标准库（图标处理用 Pillow），快捷方式读写通过 ctypes 直接调用 IShellLinkW，不需要 pywin32。
-- **命令行模式**：DeskScout.exe --scan 可直接输出清单或导出 CSV。
+### 扫描与补齐（v1.0 起）
+
+- **五路来源并行**：注册表卸载项（HKLM / WOW6432Node / HKCU）、开始菜单、Microsoft Store、Steam 库、自定义目录（绿色软件）。五路互不依赖，并行跑，整机扫描通常 6–9 秒。
+- **不误扫**：过滤卸载器、更新器、崩溃上报、帮助文档、官网链接、运行库、驱动、KB 补丁、Windows 自带工具；名称里的版本号、位数、别名后缀清洗后再去重。
+- **商店应用照扫**：Get-StartApps 与包清单双路合并，开始菜单没有入口的应用也会补齐；shell 扩展、分享宿主、后台服务直接丢掉。
+- **图标一定是软件自己的**：`SHCreateItemFromParsingName` + `IShellItemImageFactory`，exe / .lnk / `shell:AppsFolder` 的 AUMID 都有效；取不到才退回 `ExtractIconExW`，最后才是首字母色块。
+- **已有快捷方式自动排除**：先算桌面网格容量（按屏幕分辨率与图标尺寸），够就建，不够就静默回落子文件夹。
+
+### 软件体检（v1.2 新增）
+
+一张卡片回答四个问题：**装了多少、占多大、多久没打开、谁是同一家的套件**。
+
+- 体积：按安装目录有界遍历统计，结果按目录 mtime 缓存，第一次略慢、之后几乎零成本；
+- 最近使用：优先解析 UserAssist（资源管理器记录的程序运行时间），退而用目标 exe 的访问时间；
+- 套件：同一发布者 ≥3 个软件自动归组，方便发现“装了一堆全家桶”；
+- 报告可复制、可存成 TXT，CLI 用 `--health` 也能出。
+
+### 桌面布局守护（v1.2 新增）
+
+- 记录一次“理想桌面”快照：读 `Shell\Bags\<bag>\Desktop` 里 Windows 自己存的图标位置数据（Win10 的 `ItemPos*`、Win11 的 `IconLayouts`），整段原样保存；
+- 发现被新装软件挤乱后一键写回，并可重启资源管理器立即生效；
+- 对比会告诉你：新增了哪些图标、少了哪些、位置数据是否变过。
+
+### 卸载残留清理（v1.2 新增）
+
+- 两路比对：**注册表有、目录没了**；**目录还在、注册表没了**（安装根目录下无人引用且 30 天没动过的顶层目录）；
+- 默认只勾选安全项；删注册表前自动导出 `%APPDATA%\DeskScout\backup\cleanup-*.reg`，删目录走回收站；
+- 拒绝处理盘符根目录、系统目录、`WindowsApps` / `ModifiableWindowsApps` 之类系统容器。
+
+### 便携软件库（v1.2 新增）
+
+- 把一个或多个绿色软件根目录纳入“库”，每个一级子目录识别一个主程序；
+- 导出 `portable.json` 时写相对路径；换机器只需重新指定库根目录，一键重建全部快捷方式。
+
+### 开机自启管理（v1.2 新增）
+
+- 四路枚举：注册表 Run（HKCU / HKLM / WOW6432Node）、启动文件夹（用户 + 公共）、计划任务（开机/登录触发）、服务（自动启动且非系统目录）；
+- 标记“近期新增 / 临时目录 / 脚本启动”，方便揪出装软件时偷偷加的自启；
+- 禁用不删除：原始信息备份进配置，启动文件夹的文件移进 `autostart_backup`，随时可还原；服务与部分计划任务需要管理员权限，失败会如实提示。
+
+### 收藏 / 屏蔽（v1.2 新增）
+
+- **收藏**：即使软件被卸载，也保留名称、版本、发布者、官网与项目地址，方便日后重装；取消收藏即移出。入口在设置页，不占主标签。
+- **屏蔽**：不想看到的软件一键屏蔽，扫描结果里不再出现；随时可在「屏蔽名单」解除，解除后立刻回到列表。
+
+### 重装入口 / 桌面热力图（v1.2 新增）
+
+- 每个软件给出官方入口：商店应用 → Microsoft Store 搜索页；开源项目 → GitHub Releases；有官网 → 官网；都没有 → 搜索引擎兜底。
+- 桌面现状页按最近使用时间给图标分级着色，长期没动过的“僵尸快捷方式”一眼可见。
+
+### 图标风格 / 公告 / 自动更新（v1.2 增强）
+
+- 图标三种风格：原图 / 圆角底 / 单色蒙版，统一列表与新建快捷方式的观感；
+- 更新公告：程序内正文优先，远端 `announcements.json` 兜底，不发新版也能推一条通知；升级后第一次启动弹一次，之后进收件箱回看；
+- 自动更新：启动时静默检查 GitHub Release，可在应用内下载并替换重启。
+
+### 命令行（v1.2 增强）
+
+```powershell
+DeskScout.exe --scan                      # 打印扫描结果
+DeskScout.exe --scan --json               # 输出 JSON
+DeskScout.exe --scan --diff               # 对比上次扫描：新增 / 消失 / 版本变化
+DeskScout.exe --scan --health             # 附带体检（体积 / 最近使用 / 套件）
+DeskScout.exe --scan --csv out.csv        # 导出 CSV 清单
+DeskScout.exe --scan --folder D:\Tools    # 额外扫描绿色软件目录
+DeskScout.exe --version
+```
+
+`--json` 输出包含 `blocked_count`、`changes`、每个应用的 `size / last_used / homepage`，方便接定时任务或自动化。
 
 ## 使用
 
 ### 直接运行
 
-1. 从 [Releases](https://github.com/zlwzk/deskscout/releases) 下载 DeskScout.exe。
-2. 双击运行，首次会自动扫描（约 5–15 秒，取决于软件数量与磁盘速度）。
-3. 在「已安装软件」页筛选、勾选，点「为选中项创建快捷方式」。
-4. 直接创建完成；只有空位不足或个别失败时才会给出提示。
+1. 从 [Releases](https://github.com/zlwzk/deskscout/releases) 下载 `DeskScout.exe`。
+2. 双击运行，首次自动扫描（约 6–12 秒，取决于软件数量与磁盘速度）。
+3. 在「已安装软件」页筛选、勾选，点「为选中项创建快捷方式」——直接创建，不再二次确认。
+4. 想体检 / 清残留 / 管自启 / 存布局，进「设置 → 软件库与列表」。
 
-程序不写系统目录、不改注册表（只在开启「开机自启动」时写入当前用户的 Run 项），
-配置文件位于 %APPDATA%\DeskScout\config.json，图标缓存位于 %APPDATA%\DeskScout\icons\。
+程序不写系统目录、不改系统注册表（只在开启「开机自启动」时写入当前用户的 Run 项；
+清理残留、禁用服务这类动作必须你手动勾选并确认）。
 
 ### 从源码运行
 
@@ -62,102 +122,101 @@ python -m venv .venv
 .\.venv\Scripts\python DeskScout.py
 ```
 
-### 命令行
+### 打包
 
 ```powershell
-DeskScout.exe --scan                     # 打印扫描结果
-DeskScout.exe --scan --json              # 输出 JSON
-DeskScout.exe --scan --csv out.csv       # 导出 CSV 清单
-DeskScout.exe --scan --folder D:\Tools   # 额外扫描绿色软件目录
-DeskScout.exe --version
+powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 ```
+
+产物为 `dist\DeskScout.exe`（onefile + windowed，内嵌图标与版本信息）。
+
+## 数据放在哪（升级不丢）
+
+| 内容 | 位置 |
+| --- | --- |
+| 配置（扫描范围、快捷方式、公告收件箱、收藏、屏蔽、自启禁用备份、桌面快照记录） | `%APPDATA%\DeskScout\config.json`（原子写入，自动保留 `config.json.bak`） |
+| 图标缓存（多尺寸 .ico） | `%APPDATA%\DeskScout\icons\` |
+| 桌面布局快照原始数据 | `%APPDATA%\DeskScout\desktop_layout.json` |
+| 上一次扫描结果（供 `--diff`） | `%APPDATA%\DeskScout\last_scan.json` |
+| 体积缓存 | `%APPDATA%\DeskScout\size_cache.json` |
+| 自启备份（启动文件夹里被禁用的文件） | `%APPDATA%\DeskScout\autostart_backup\` |
+| 清理前的注册表备份 | `%APPDATA%\DeskScout\backup\cleanup-*.reg` |
+
+版本升级只补默认值、不覆盖已有数据：收藏、屏蔽、自启禁用记录、桌面快照都会原样保留。
 
 ## 扫描与过滤是怎么做的
 
 ```
 注册表 Uninstall ─┐
-开始菜单 .lnk     ─┤   归一化 → 系统组件判定 → 启动目标校验 → 名称清洗 → 去重 → 目录归并
-Microsoft Store   ─┼→                                                        ↘ GitHub 来源识别 → 桌面比对
-Steam 库          ─┤
+开始菜单 .lnk     ─┤   并行取数 → 归一化 → 系统组件判定 → 启动目标校验
+Microsoft Store   ─┼→ 名称清洗 → 去重 → 目录归并 → 屏蔽名单 → GitHub 来源识别
+Steam 库          ─┤                                              ↘ 桌面比对 → 渲染
 自定义目录        ─┘
 ```
 
-几条关键规则：
+关键规则：
 
-1. **系统组件判定**：发布者/名称/安装位置命中 Microsoft Visual C++、.NET Framework、Windows SDK、Driver、Update for、KB 补丁、Runtime、Redistributable 等特征即排除；SystemComponent=1、ParentKeyName 存在、ReleaseType 为 Update/Hotfix 同样排除。
-2. **商店应用例外**：来源为 AppX 的条目走独立规则，只排除 framework、SignatureKind 为 System/None、以及系统不可移除包；Microsoft.*、MicrosoftWindows.* 前缀直接略过，用户自己装的（含第三方厂商预装的硬件控制面板）保留。
-3. **启动目标校验**：DisplayIcon、猜测目录里的 exe 都要过 unins/setup/update/repair/crash/report/helper 之类的黑名单；DisplayIcon 指向图标或卸载器时，继续下钻到安装目录与子目录里找真正的主程序，避免把卸载器当软件。
-4. **名称清洗**：循环剥离「版本 1.2」「v1.2」「(x64)」「(64-位)」「User」「启动器/客户端/Launcher」等后缀，再做指纹去重。
-5. **套件归并**：同一安装目录下的多个入口（Git CMD、AutoCAD 参照管理器、WPS 配置工具）归并到主程序，不会在桌面铺一堆子工具。
-6. **不按路径去重**：不同软件可能共用同一个启动器（例如 Anaconda 里的 pythonw.exe 同时承载 Navigator 与 Spyder），按路径合并会误吞软件，因此只按名称指纹去重。
-7. **图标三步走**：本地图片文件直读 → Shell 图像接口（IShellItemImageFactory::GetImage）→ ExtractIconExW 兜底 → 首字母色块；商店应用按 AppsFolder 下的 AUMID、目标 exe、icon_path、安装目录逐级尝试。
+1. **系统组件 vs 用户软件**：`Microsoft.*`、运行库、驱动、补丁、Windows 自带工具归为系统组件默认隐藏；商店应用、Office、VS Code 这类用户自装的不受影响。
+2. **有无启动目标**：没有可用启动目标的条目默认隐藏（可在设置里打开），避免“卸载残留”混进列表。
+3. **同一个软件只出现一次**：先按名称指纹去重，再把同一安装目录下的子工具（Git CMD、AutoCAD 参照管理器）并到主程序。
+4. **发布者只认本地线索**：下载来源、版本资源、注册表链接；不做同名仓库联网猜测（实测会误判，已移除）。
+5. **屏蔽在扫描阶段生效**：被屏蔽的软件不计数、不渲染，界面更快。
 
 ## 版本号怎么涨
 
-| 档位 | 什么时候用 | 例子 |
+| 类型 | 例子 | 触发条件 |
 | --- | --- | --- |
-| 小更新（第三位 +1） | 只修 bug、改文案、调参数，用法不变 | 1.1.0 → 1.1.1 |
-| 中更新（第二位 +1） | 新增功能、重构某个模块、交互有变化 | 1.0.0 → 1.1.0 |
-| 大更新（第一位 +1） | 不兼容改动、整体重做、配置结构破坏性变化 | 1.x → 2.0.0 |
-
-发版时同步更新 deskscout/__init__.py 的 __version__、version_info.txt、README 徽章、
-CHANGELOG.md、RELEASE_NOTES.md，以及 deskscout/announcements.py 里的应用内公告正文。
+| 小更新 | `1.2.0 → 1.2.1` | 只修 bug、改文案、调参数 |
+| 中更新 | `1.1.0 → 1.2.0` | 新增功能、增强既有功能，用法兼容 |
+| 大更新 | `1.2.0 → 2.0.0` | 不兼容改动（数据结构重做、交互推翻） |
 
 ## 隐私
 
-- 扫描结果只存在内存与本地配置文件中，不联网上传。
-- GitHub 发布者识别只读本机线索（下载来源、版本资源、注册表链接），不按软件名去 GitHub 搜索，也就不存在把清单发出去的问题。
-- 应用只在「检查更新」时访问 GitHub Releases API，请求里不含任何本机软件信息。
-- 导出的 CSV 只包含软件名称、版本、发布者、启动路径；是否导出由你决定。
-- 仓库与发布包中不含开发者个人信息、邮箱、机器名或桌面文件清单。
+- 扫描结果、体积统计、使用记录全部只在本机，**不上传**；
+- 唯一的联网行为是：检查 GitHub Release、下载新版本、拉取公告 JSON——都由你可在设置里关闭；
+- 仓库里不含任何个人路径、邮箱、机器名或本机软件清单；
+- 清理注册表前一定先导出备份；删除目录一律进回收站。
 
 ## 常见问题
 
-**Q：为什么某个软件没扫到？**
-A：先确认它是否在「设置 → 扫描范围」里勾选了对应来源；绿色软件请用「自定义目录」指定路径。若仍未出现，欢迎提 Issue 并附上该软件的安装方式（安装包 / 商店 / 免安装）。
+**Q：为什么有的软件扫不到？**
+A：它可能没有卸载项、也不在开始菜单，属于纯绿色软件。用设置里的「自定义目录」或「便携软件库」把它加进来即可。
 
-**Q：为什么某些系统自带应用出现在列表里？**
-A：默认已排除 Windows 自带工具与运行库；如果你在设置里打开了「显示系统组件」，它们会重新出现，便于排查。
+**Q：为什么有的软件显示“无发布者”？**
+A：本地线索里确实没有官网/GitHub 地址。DeskScout 不做联网同名猜测——猜错的代价比留空大。
 
-**Q：桌面空位是怎么算的？**
-A：按当前屏幕工作区与系统图标单元尺寸换算可容纳的图标格数，再减去桌面上已有的项目。不同 DPI 缩放下格子数量会不同。
+**Q：清理残留会不会把系统搞坏？**
+A：默认只勾选安全项（空目录、注册表指向已不存在的路径）；删注册表前自动导出 `.reg`，删目录走回收站；系统目录与盘符根目录一律拒绝处理。
 
-**Q：创建错了怎么办？**
-A：DeskScout 只新建快捷方式，不移动、不删除任何已有文件；直接删掉新建的 .lnk 即可。
+**Q：禁用自启后怎么恢复？**
+A：回到「开机自启」对话框，选中已禁用项点「启用 / 还原选中」，会从配置里的备份恢复。
 
-**Q：为什么某个软件的发布者显示成 GitHub 地址？**
-A：说明它是从 GitHub 下载的（下载来源里带着项目页）。原发布者会保留在备注里。识别不到就保持原发布者或留空，不会瞎猜。
+**Q：换电脑后不想重新一个个建快捷方式？**
+A：先把绿色软件目录加进「便携软件库」→ 导出 `portable.json`；新机器导入并指定新的库根目录，一键重建。
 
 ## 开发
 
 ```
 deskscout/
-  models.py        数据模型
-  filters.py       名称清洗、系统组件识别、去重
-  com.py           IShellLinkW / IPersistFile（ctypes 手写）
-  scanners.py      注册表、开始菜单、商店、Steam、目录扫描
-  engine.py        编排、归并、桌面比对
-  provenance.py    GitHub 来源识别（只读本机线索）
-  announcements.py 应用内更新公告
-  desktop.py       桌面枚举与容量计算
-  shortcuts.py     命名避让与批量创建
-  config.py        配置读写（含一次性迁移）
-  icons.py         Shell 图标提取、ICO 缓存、首字母色块
-  fileinfo.py      PE 版本资源读取
-  updater.py       Release 检查与自替换
-  ui.py            Tkinter 界面
-  main.py          入口（GUI / CLI）
-dev/               开发期自检脚本（不入发布包）
+├─ scanners.py      五路扫描（注册表 / 开始菜单 / 商店 / Steam / 目录）
+├─ filters.py       系统组件识别、名称清洗、去重
+├─ engine.py        并行编排、目录归并、桌面比对
+├─ provenance.py    只读本地线索的 GitHub 来源识别
+├─ icons.py         Shell 图标 + 三种呈现风格 + ICO 缓存
+├─ shortcuts.py     快捷方式创建、重名避让、空位回落
+├─ health.py        体检：体积 / 最近使用 / 套件
+├─ layout.py        桌面布局快照与还原
+├─ cleanup.py       残留比对、注册表备份、回收站删除
+├─ portable.py      便携软件库导出 / 重建
+├─ autostart.py     自启四路枚举与开关
+├─ library.py       收藏夹与屏蔽名单
+├─ downloads.py     官方下载 / 重装入口
+├─ history.py       扫描历史与 --diff
+├─ announcements.py 内置公告 + 远端公告同步
+├─ ui.py / ui_tools.py  主界面与工具对话框
+└─ config.py        原子写入、.bak 备份、状态文件读写
 ```
-
-打包：
-
-```powershell
-.\build.ps1
-```
-
-产物在 dist\DeskScout.exe。
 
 ## 许可
 
-MIT License，详见 [LICENSE](LICENSE)。
+MIT License。随意使用、修改、分发，请保留出处。

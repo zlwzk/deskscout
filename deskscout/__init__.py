@@ -2,7 +2,7 @@
 
 APP_NAME = "DeskScout"
 APP_NAME_CN = "桌面应用管家"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 REPO = "zlwzk/deskscout"
 HOMEPAGE = f"https://github.com/{REPO}"

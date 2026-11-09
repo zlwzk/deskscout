@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from .filters import dedupe, normalize_name, normalize_path
@@ -18,6 +19,7 @@ def scan_all(
     options: ScanOptions,
     desktop_items: list[DesktopItem] | None = None,
     progress: Progress = None,
+    config: dict | None = None,
 ) -> ScanReport:
     started = time.perf_counter()
     report = ScanReport()
@@ -28,35 +30,43 @@ def scan_all(
         if progress:
             progress(message, percent)
 
+    # 各路来源互不依赖，并行跑：注册表/开始菜单/商店/Steam/自定义目录
+    tasks: list[tuple[str, str, Callable]] = []
     if options.registry:
-        note("正在扫描注册表卸载项…", 5)
-        items = scan_registry(progress)
-        stats["registry"] = len(items)
-        collected.extend(items)
-
+        tasks.append(("registry", "正在扫描注册表卸载项…", scan_registry))
     if options.startmenu:
-        note("正在扫描开始菜单…", 35)
-        items = scan_start_menu(progress)
-        stats["startmenu"] = len(items)
-        collected.extend(items)
-
+        tasks.append(("startmenu", "正在扫描开始菜单…", scan_start_menu))
     if options.store:
-        note("正在读取 Microsoft Store 应用…", 50)
-        items = scan_store(progress)
-        stats["store"] = len(items)
-        collected.extend(items)
-
+        tasks.append(("store", "正在读取 Microsoft Store 应用…", scan_store))
     if options.steam:
-        note("正在读取 Steam 游戏库…", 68)
-        items = scan_steam(progress)
-        stats["steam"] = len(items)
-        collected.extend(items)
-
+        tasks.append(("steam", "正在读取 Steam 游戏库…", scan_steam))
     if options.folder and options.custom_folder:
-        note("正在扫描自定义目录…", 76)
-        items = scan_folder(options.custom_folder, progress)
-        stats["folder"] = len(items)
+        tasks.append(("folder", "正在扫描自定义目录…", lambda _p=None: scan_folder(options.custom_folder, _p)))
+
+    if tasks:
+        note("正在并行扫描各来源…", 5)
+    if len(tasks) == 1:
+        key, _message, func = tasks[0]
+        try:
+            items = func(None)
+        except (OSError, ValueError):
+            items = []
+        stats[key] = len(items)
         collected.extend(items)
+    elif tasks:
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(4, len(tasks)), thread_name_prefix="scan") as pool:
+            futures = {pool.submit(func, None): (key, message) for key, message, func in tasks}
+            for future in as_completed(futures):
+                key, message = futures[future]
+                try:
+                    items = future.result()
+                except (OSError, ValueError, RuntimeError):
+                    items = []
+                stats[key] = len(items)
+                collected.extend(items)
+                done += 1
+                note(message.replace("正在", "已完成"), 5 + int(60 * done / len(tasks)))
 
     report.raw_count = len(collected)
 
@@ -78,6 +88,13 @@ def scan_all(
 
     # 3.2) GitHub 来源识别：把发布者写成项目地址（只读本地线索，不联网）
     report.github_count = enrich_publishers(collected)
+
+    # 3.3) 屏蔽名单：被屏蔽的软件从结果里彻底消失（可在设置里解除）
+    if config is not None:
+        from .library import filter_blocked
+
+        collected, blocked = filter_blocked(config, collected)
+        report.blocked_count = blocked
     report.entries = collected
 
     # 4) 与桌面已有快捷方式比对

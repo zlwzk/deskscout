@@ -146,6 +146,9 @@ _pil_cache: dict[tuple[str, int], object] = {}
 _DIB_WHITE = 0x00FFFFFF
 _DIB_BLACK = 0x00000000
 _DI_NORMAL = 0x0003
+_ICON_STYLE = "native"
+ICON_STYLES = ("native", "rounded", "mono")
+_STYLE_COLOR = (37, 99, 235, 255)
 _IID_SHELLITEM_IMAGE_FACTORY = GUID.from_string("BCC18B79-BA16-442F-80C4-8A59C30C463B")
 _SIIGBF_ICONONLY = 0x00000004
 _SIIGBF_BIGGERSIZEOK = 0x00000001
@@ -399,6 +402,49 @@ def apps_folder_name(entry) -> str:
     return ""
 
 
+def set_icon_style(style: str) -> str:
+    """切换图标呈现风格：native（原图）/ rounded（统一圆角底）/ mono（单色蒙版）."""
+    global _ICON_STYLE
+    _ICON_STYLE = style if style in ICON_STYLES else "native"
+    _pil_cache.clear()
+    _image_cache.clear()
+    _cache.clear()
+    return _ICON_STYLE
+
+
+def icon_style() -> str:
+    return _ICON_STYLE
+
+
+def _styled(image, size: int):
+    """给图标套统一底/蒙版；风格为 native 时原样返回."""
+    if image is None or not _PIL_OK or _ICON_STYLE == "native":
+        return image
+    try:
+        image = image.convert("RGBA")
+        if _ICON_STYLE == "rounded":
+            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            radius = max(4, size // 4)
+            draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=radius,
+                                   fill=(255, 255, 255, 240), outline=(226, 232, 240, 255))
+            inner = max(8, int(size * 0.82))
+            icon = image.resize((inner, inner), Image.LANCZOS)
+            offset = (size - inner) // 2
+            canvas.paste(icon, (offset, offset), icon)
+            return canvas
+        # mono：取亮度做蒙版，统一染成品牌蓝
+        lum = image.convert("L")
+        mask = lum.point(lambda value: 255 if value > 24 else 0)
+        alpha = image.getchannel("A")
+        mask = Image.composite(alpha, Image.new("L", image.size, 0), mask)
+        tinted = Image.new("RGBA", image.size, _STYLE_COLOR)
+        tinted.putalpha(mask)
+        return tinted
+    except (OSError, ValueError):
+        return image
+
+
 def entry_icon_image(entry, size: int = 32):
     """按条目本身解析图标：Store 应用 -> AppsFolder；普通软件 -> 启动目标/图标文件."""
     if not _PIL_OK:
@@ -422,15 +468,15 @@ def entry_icon_image(entry, size: int = 32):
     for candidate in candidates:
         image = image_for_path(candidate, size)
         if image is not None:
-            return image
-    return _letter_tile(getattr(entry, "name", "?") or "?", size)
+            return _styled(image, size)
+    return _styled(_letter_tile(getattr(entry, "name", "?") or "?", size), size)
 
 
 def entry_icon_pil(entry, size: int = 32):
     """不给 Tk 的纯 PIL 版本，供后台线程预取图标（ImageTk 只能在主线程建）."""
     if not _PIL_OK:
         return None
-    key = (f"pil:{getattr(entry, 'key', '') or getattr(entry, 'name', '')}", size)
+    key = (f"pil:{getattr(entry, 'key', '') or getattr(entry, 'name', '')}", size, _ICON_STYLE)
     if key in _pil_cache:
         return _pil_cache[key]
     try:
@@ -503,7 +549,7 @@ def shortcut_icon(entry, size: int = 256) -> str:
             stamp = f"{stat.st_mtime_ns}"
     except OSError:
         stamp = ""
-    digest = hashlib.sha1(f"{key_source}|{stamp}".encode("utf-8", "ignore")).hexdigest()[:16]
+    digest = hashlib.sha1(f"{key_source}|{stamp}|{_ICON_STYLE}".encode("utf-8", "ignore")).hexdigest()[:16]
     ico_path = os.path.join(icon_cache_dir(), f"{digest}.ico")
 
     if os.path.exists(ico_path):
