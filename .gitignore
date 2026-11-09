@@ -1,0 +1,12 @@
+# 构建与本地文件
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+dev/shot_*.png
+dev/*.log
+.idea/
+.vscode/
+*.zip
