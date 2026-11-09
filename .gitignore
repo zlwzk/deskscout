@@ -5,8 +5,10 @@ dist/
 *.spec
 __pycache__/
 *.pyc
-dev/shot_*.png
-dev/*.log
 .idea/
 .vscode/
 *.zip
+
+# 开发期脚本与截图（含本机软件清单，不入仓库）
+dev/*
+!dev/make_assets.py

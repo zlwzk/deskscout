@@ -1,4 +1,4 @@
-"""读取 exe 的版本资源（产品名/公司/版本），用于补全绿色软件信息."""
+"""读取 exe 的版本资源（产品名/公司/版本/版权），用于补全软件信息."""
 
 from __future__ import annotations
 
@@ -23,6 +23,18 @@ _version.VerQueryValueW.argtypes = [
 ]
 _version.VerQueryValueW.restype = ctypes.c_bool
 
+STRING_KEYS = (
+    "ProductName",
+    "FileDescription",
+    "CompanyName",
+    "LegalCopyright",
+    "Comments",
+    "InternalName",
+    "OriginalFilename",
+    "URLInfoAbout",
+    "HelpLink",
+)
+
 
 def _query(buffer, subblock: str) -> str:
     pointer = ctypes.c_void_p()
@@ -39,20 +51,22 @@ def _query(buffer, subblock: str) -> str:
         return ""
 
 
-def read_version_info(path: str) -> dict:
-    """返回 {product, description, company, version}；失败返回空字典."""
+def _open_buffer(path: str):
     if not path or not os.path.isfile(path):
-        return {}
+        return None
     try:
         size = _version.GetFileVersionInfoSizeW(str(path), None)
         if not size:
-            return {}
+            return None
         buffer = ctypes.create_string_buffer(size)
         if not _version.GetFileVersionInfoW(str(path), 0, size, buffer):
-            return {}
+            return None
+        return buffer
     except (OSError, ctypes.ArgumentError):
-        return {}
+        return None
 
+
+def _string_block(buffer) -> str:
     lang, codepage = 0x0409, 0x04B0
     pointer = ctypes.c_void_p()
     length = ctypes.c_uint32()
@@ -61,12 +75,38 @@ def read_version_info(path: str) -> dict:
     ) and pointer.value and length.value >= 4:
         values = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint16))
         lang, codepage = values[0], values[1]
+    return f"\\StringFileInfo\\{lang:04x}{codepage:04x}\\"
 
-    prefix = f"\\StringFileInfo\\{lang:04x}{codepage:04x}\\"
+
+def read_strings(path: str, keys: tuple[str, ...] | list[str] = STRING_KEYS) -> dict:
+    """按需读取若干版本资源字段；读不到返回空字典."""
+    buffer = _open_buffer(path)
+    if buffer is None:
+        return {}
+    prefix = _string_block(buffer)
+    values = {}
+    for key in keys:
+        text = _query(buffer, prefix + key)
+        if text:
+            values[key] = text
+    return values
+
+
+def read_version_info(path: str) -> dict:
+    """返回 {product, description, company, version}；失败返回空字典."""
+    buffer = _open_buffer(path)
+    if buffer is None:
+        return {}
+    prefix = _string_block(buffer)
+    product = _query(buffer, prefix + "ProductName")
+    description = _query(buffer, prefix + "FileDescription")
+    company = _query(buffer, prefix + "CompanyName")
+    version = _query(buffer, prefix + "ProductVersion") or _query(buffer, prefix + "FileVersion")
+    if not (product or description or company):
+        return {}
     return {
-        "product": _query(buffer, prefix + "ProductName"),
-        "description": _query(buffer, prefix + "FileDescription"),
-        "company": _query(buffer, prefix + "CompanyName"),
-        "version": _query(buffer, prefix + "ProductVersion")
-        or _query(buffer, prefix + "FileVersion"),
+        "product": product,
+        "description": description,
+        "company": company,
+        "version": version,
     }

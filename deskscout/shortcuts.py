@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from . import com
+from . import com, icons
 from .filters import clean_display_name
 from .models import AppEntry
 
@@ -96,7 +96,7 @@ def create_for_entries(
             ok = com.create_url_shortcut(link_path[:-4] + ".url", entry.target)
             final = link_path[:-4] + ".url"
         else:
-            icon = entry.icon_path or entry.target
+            icon = icons.shortcut_icon(entry) or entry.icon_path or entry.target
             ok = com.create_shortcut(
                 link_path=link_path,
                 target=entry.target,

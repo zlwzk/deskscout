@@ -8,6 +8,7 @@ from typing import Callable
 
 from .filters import dedupe, normalize_name, normalize_path
 from .models import AppEntry, DesktopItem, ScanOptions, ScanReport
+from .provenance import enrich_publishers
 from .scanners import scan_folder, scan_registry, scan_start_menu, scan_steam, scan_store
 
 Progress = Callable[[str, int], None] | None
@@ -74,6 +75,9 @@ def scan_all(
     # 3.1) 同一个安装目录下的子工具（如 Git CMD / AutoCAD 参照管理器）归并到主程序
     collected, location_merged = merge_by_location(collected)
     report.merged_count = merged + location_merged
+
+    # 3.2) GitHub 来源识别：把发布者写成项目地址（只读本地线索，不联网）
+    report.github_count = enrich_publishers(collected)
     report.entries = collected
 
     # 4) 与桌面已有快捷方式比对

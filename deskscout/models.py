@@ -38,6 +38,7 @@ class AppEntry:
     target: str = ""
     arguments: str = ""
     working_dir: str = ""
+    source_url: str = ""
     size_bytes: int = 0
     shortcut_name: str = ""
     invalid: bool = False
@@ -106,6 +107,7 @@ class ScanReport:
     raw_count: int = 0
     filtered_count: int = 0
     merged_count: int = 0
+    github_count: int = 0
     elapsed_ms: int = 0
     source_stats: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)

@@ -12,7 +12,10 @@ import webbrowser
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
-from . import APP_NAME_CN, HOMEPAGE, __version__, config, desktop, engine, icons, shortcuts, updater
+from . import (
+    APP_NAME_CN, HOMEPAGE, __version__, announcements, config, desktop, engine,
+    icons, shortcuts, updater,
+)
 from .filters import clean_display_name, normalize_name
 from .models import AppEntry, ScanOptions
 
@@ -47,6 +50,9 @@ class DeskScoutApp(tk.Tk):
         self.capacity: dict = {}
         self.row_map: dict[str, AppEntry] = {}
         self.queue: queue.Queue = queue.Queue()
+        self._icon_queue: queue.Queue = queue.Queue()
+        self._icon_photos: dict[str, object] = {}
+        self._icon_gen = 0
         self.scanning = False
         self.creating = False
         self.sort_column = "name"
@@ -75,6 +81,7 @@ class DeskScoutApp(tk.Tk):
         self.bind("<F5>", lambda _event: self.start_scan())
         self.after(80, self._drain_queue)
         self.after(900, self._auto_update_check)
+        self.after(1500, self._startup_announcement)
         if self.cfg["ui"].get("auto_scan_on_start", True):
             self.after(150, self.start_scan)
         else:
@@ -122,7 +129,7 @@ class DeskScoutApp(tk.Tk):
                         bordercolor=BORDER, padding=(12, 6), font=(FONT, 10))
         style.map("Ghost.TButton", background=[("active", "#eef2fb")])
         style.configure("List.Treeview", background=CARD, fieldbackground=CARD,
-                        foreground=TEXT, rowheight=30, borderwidth=0, font=(FONT, 9))
+                        foreground=TEXT, rowheight=34, borderwidth=0, font=(FONT, 9))
         style.configure("List.Treeview.Heading", background="#eef1f8", foreground=TEXT,
                         font=(FONT, 9, "bold"), relief="flat", padding=(6, 6))
         style.map("List.Treeview", background=[("selected", "#dbe6ff")],
@@ -238,7 +245,7 @@ class DeskScoutApp(tk.Tk):
         wrap.pack(fill="both", expand=True)
 
         columns = ("name", "version", "source", "category", "shortcut", "publisher", "target")
-        self.tree = ttk.Treeview(wrap, columns=columns, show="headings",
+        self.tree = ttk.Treeview(wrap, columns=columns, show="tree headings",
                                  style="List.Treeview", selectmode="extended")
         headings = {
             "name": ("名称", 240, "w"),
@@ -252,6 +259,9 @@ class DeskScoutApp(tk.Tk):
         for column, (label, width, anchor) in headings.items():
             self.tree.heading(column, text=label, command=lambda c=column: self.sort_by(c))
             self.tree.column(column, width=width, anchor=anchor, stretch=column in ("name", "target"))
+        # 第 0 列只放真实图标（软件自己的 exe/商店图标）
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=34, minwidth=34, stretch=False, anchor="center")
 
         scrollbar = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview,
                                   style="List.Vertical.TScrollbar")
@@ -432,6 +442,9 @@ class DeskScoutApp(tk.Tk):
         ttk.Checkbutton(filter_box, text="隐藏没有启动目标的残留条目",
                         variable=self.var_hide_targetless, style="Card.TCheckbutton",
                         command=self.save_settings).pack(anchor="w", pady=2)
+        tk.Label(filter_box, text="商店应用（包括没有开始菜单入口的）同样能取到原始图标；"
+                                  "发布者一栏会自动识别 GitHub 项目地址（只读本机下载来源，不联网猜测）。",
+                 font=(FONT, 9), bg=CARD, fg=MUTED, wraplength=420, justify="left").pack(anchor="w", pady=(4, 0))
         tk.Label(filter_box, text="默认会排除 VC++ 运行库、.NET、驱动、KB 补丁、Windows 自带工具等系统组件；"
                                   "微软账号下自行安装的 Office、VS Code、商店应用仍会保留。",
                  font=(FONT, 9), bg=CARD, fg=MUTED, wraplength=420, justify="left").pack(anchor="w", pady=(4, 0))
@@ -442,7 +455,7 @@ class DeskScoutApp(tk.Tk):
             tips_box,
             text=("1. 首次启动会自动扫描，也可以用 F5 重新扫描。\n"
                   "2. 在「已安装软件」页按来源 / 类别筛选，Ctrl 或 Shift 多选。\n"
-                  "3. 点「为选中项创建快捷方式」，先看空位再确认创建。\n"
+                  "3. 点「为选中项创建快捷方式」，自动检查空位后直接创建，不再二次确认。\n"
                   "4. 桌面已有快捷方式的软件会自动跳过，不会重复创建。\n"
                   "5. 设置里的扫描范围与过滤规则会在下一次扫描生效。"),
             font=(FONT, 9), bg=CARD, fg=MUTED, justify="left", anchor="nw",
@@ -464,7 +477,11 @@ class DeskScoutApp(tk.Tk):
         ttk.Entry(folder_line, textvariable=self.folder_name_var, width=18,
                   style="Search.TEntry").pack(side="left", padx=6)
         self.folder_name_var.trace_add("write", lambda *_: self.save_settings())
-        tk.Label(shortcut_box, text="创建前会检查桌面剩余空位；空间不足时可一键改为放入子文件夹。",
+        self.var_confirm_create = tk.BooleanVar()
+        ttk.Checkbutton(shortcut_box, text="创建前再弹一次确认（默认关闭，选中即创建）",
+                        variable=self.var_confirm_create, style="Card.TCheckbutton",
+                        command=self.save_settings).pack(anchor="w", pady=(6, 0))
+        tk.Label(shortcut_box, text="创建前仍会检查桌面剩余空位；空间不够时自动放入子文件夹，不再打断你。",
                  font=(FONT, 9), bg=CARD, fg=MUTED, wraplength=420, justify="left").pack(anchor="w", pady=(4, 0))
 
         update_box = ttk.LabelFrame(right, text="更新与便捷设置", style="Section.TLabelframe", padding=12)
@@ -485,10 +502,13 @@ class DeskScoutApp(tk.Tk):
         actions.pack(fill="x", pady=(8, 0))
         ttk.Button(actions, text="检查更新", style="Ghost.TButton",
                    command=lambda: self.check_update(manual=True)).pack(side="left")
+        self.inbox_button = ttk.Button(actions, text="公告收件箱", style="Ghost.TButton",
+                                       command=self._open_inbox)
+        self.inbox_button.pack(side="left", padx=8)
         ttk.Button(actions, text="打开配置目录", style="Ghost.TButton",
-                   command=lambda: os.startfile(config.app_dir())).pack(side="left", padx=8)
+                   command=lambda: os.startfile(config.app_dir())).pack(side="left")
         ttk.Button(actions, text="重置设置", style="Ghost.TButton",
-                   command=self.reset_settings).pack(side="left")
+                   command=self.reset_settings).pack(side="left", padx=8)
 
         about_box = ttk.LabelFrame(right, text="关于", style="Section.TLabelframe", padding=12)
         about_box.pack(fill="both", expand=True, pady=(10, 0))
@@ -497,7 +517,8 @@ class DeskScoutApp(tk.Tk):
             text=(f"DeskScout 桌面应用管家 v{__version__}\n"
                   "• 纯本地运行：扫描结果只留在本机，工具不联网上传任何清单\n"
                   "• 只读取安装信息与快捷方式，不修改已安装软件\n"
-                  "• 所有快捷方式均在确认后创建，可随时删除\n"
+                  "• 创建快捷方式默认不再二次确认，可在上方设置里重新开启\n"
+                  "• 图标取自 Windows Shell，商店应用同样显示原始图标\n"
                   f"• 项目主页：{HOMEPAGE}"),
             font=(FONT, 9), bg=CARD, fg=MUTED, justify="left", anchor="w",
         )
@@ -520,6 +541,7 @@ class DeskScoutApp(tk.Tk):
         short = self.cfg.get("shortcuts", {})
         self.shortcut_mode.set(str(short.get("mode", "desktop")))
         self.folder_name_var.set(str(short.get("folder_name", "新建快捷方式")))
+        self.var_confirm_create.set(bool(short.get("confirm_before_create", False)))
 
         ui = self.cfg.get("ui", {})
         self.var_auto_scan.set(bool(ui.get("auto_scan_on_start", True)))
@@ -546,7 +568,7 @@ class DeskScoutApp(tk.Tk):
         self.cfg["shortcuts"] = {
             "mode": self.shortcut_mode.get(),
             "folder_name": self.folder_name_var.get().strip() or "新建快捷方式",
-            "confirm_before_create": True,
+            "confirm_before_create": self.var_confirm_create.get(),
         }
         self.cfg["ui"]["auto_scan_on_start"] = self.var_auto_scan.get()
         self.cfg["update"]["auto_check"] = self.var_auto_update.get()
@@ -696,6 +718,51 @@ class DeskScoutApp(tk.Tk):
                         shortcut_text, entry.publisher or "—", target_text or "—"),
             )
             self.row_map[iid] = entry
+        self._refresh_row_icons(rows)
+
+    def _refresh_row_icons(self, rows: list[AppEntry]) -> None:
+        """图标在后台线程预取，主线程按批贴上去，避免列表卡住."""
+        self._icon_gen += 1
+        generation = self._icon_gen
+        self._icon_queue = queue.Queue()
+        self._icon_photos = {}
+
+        def worker() -> None:
+            for index, entry in enumerate(rows):
+                try:
+                    image = icons.entry_icon_pil(entry, 24)
+                except (OSError, ValueError):
+                    image = None
+                self._icon_queue.put((generation, f"row{index}", image))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(60, self._drain_row_icons)
+
+    def _drain_row_icons(self) -> None:
+        applied = 0
+        while applied < 16:
+            try:
+                generation, iid, image = self._icon_queue.get_nowait()
+            except queue.Empty:
+                break
+            if generation != self._icon_gen:
+                return
+            applied += 1
+            if image is None or iid not in self.row_map:
+                continue
+            try:
+                photo = icons.tk_photo(image)
+            except (RuntimeError, TypeError, ValueError):
+                continue
+            if photo is None:
+                continue
+            self._icon_photos[iid] = photo
+            try:
+                self.tree.item(iid, image=photo)
+            except tk.TclError:
+                continue
+        if not self._icon_queue.empty():
+            self.after(40, self._drain_row_icons)
 
     def _sort_key(self, entry: AppEntry):
         column = self.sort_column
@@ -745,7 +812,7 @@ class DeskScoutApp(tk.Tk):
         if entry is None:
             return
         self._detail_entry = entry
-        photo = icons.get_icon(entry.icon_path or entry.target, entry.name, 48)
+        photo = icons.get_entry_icon(entry, 48)
         if photo is not None:
             self.detail_icon.configure(image=photo)
             self.detail_icon.image = photo
@@ -877,34 +944,28 @@ class DeskScoutApp(tk.Tk):
         mode = self.shortcut_mode.get()
         folder = shortcuts.target_folder(shortcuts.desktop_base_dir(), mode,
                                          self.folder_name_var.get())
+        fallback = False
         if mode == "desktop" and len(todo) > free:
-            answer = messagebox.askyesno(
-                "桌面空间不足",
-                f"桌面只剩 {free} 个空位，本次要创建 {len(todo)} 个快捷方式。\n\n"
-                f"是否改为放入「{self.folder_name_var.get() or '新建快捷方式'}」文件夹？\n"
-                "（选择“否”则取消本次操作）",
-                parent=self,
-            )
-            if not answer:
-                self._set_status("已取消：桌面空间不足")
-                return
             folder = shortcuts.target_folder(shortcuts.desktop_base_dir(), "folder",
                                              self.folder_name_var.get())
+            fallback = True
 
-        preview = shortcuts.plan_preview(todo, folder, 6)
-        preview_text = "\n".join(f"· {name}" for name in preview)
-        if len(todo) > len(preview):
-            preview_text += f"\n… 其余 {len(todo) - len(preview)} 个"
-        message = (
-            f"将在以下位置创建 {len(todo)} 个快捷方式：\n{folder}\n\n"
-            f"{preview_text}\n\n"
-            f"桌面剩余空位：{free}"
-        )
-        if note_lines:
-            message = "\n".join(note_lines) + "\n\n" + message
-        if not messagebox.askyesno("确认创建快捷方式", message, parent=self):
-            return
+        if config.get(self.cfg, "shortcuts.confirm_before_create", False):
+            preview = shortcuts.plan_preview(todo, folder, 6)
+            preview_text = "\n".join(f"· {name}" for name in preview)
+            if len(todo) > len(preview):
+                preview_text += f"\n… 其余 {len(todo) - len(preview)} 个"
+            message = (
+                f"将在以下位置创建 {len(todo)} 个快捷方式：\n{folder}\n\n"
+                f"{preview_text}\n\n桌面剩余空位：{free}"
+            )
+            if note_lines:
+                message = "\n".join(note_lines) + "\n\n" + message
+            if not messagebox.askyesno("确认创建快捷方式", message, parent=self):
+                return
 
+        self._create_fallback = fallback
+        self._create_notes = note_lines
         self.creating = True
         self.create_button.configure(state="disabled")
         self._set_pill("创建中…", "#fff7e6", WARN_ORANGE)
@@ -927,7 +988,6 @@ class DeskScoutApp(tk.Tk):
         self.create_button.configure(state="normal")
         self.progress.pack_forget()
         self._set_pill("就绪", "#eef2fb", ACCENT_DARK)
-        self.creating = False
         summary = f"已创建 {result.created_count} 个快捷方式"
         if result.skipped:
             summary += f"，跳过 {len(result.skipped)} 个"
@@ -935,12 +995,17 @@ class DeskScoutApp(tk.Tk):
             summary += f"，失败 {len(result.failed)} 个"
         self._set_status(f"{summary} → {folder}")
         self.refresh_desktop()
-        lines = [summary, "", f"位置：{folder}"]
+
         if result.failed:
-            lines.append("")
-            lines.append("失败明细：")
+            lines = [summary, "", f"位置：{folder}", "", "失败明细："]
             lines.extend(f"· {name}：{reason}" for name, reason in result.failed[:8])
-        messagebox.showinfo("创建完成", "\n".join(lines), parent=self)
+            messagebox.showwarning("部分快捷方式创建失败", "\n".join(lines), parent=self)
+        elif getattr(self, "_create_fallback", False):
+            messagebox.showinfo(
+                "桌面空间不足，已改放文件夹",
+                f"桌面只剩 {self.capacity.get('free', 0)} 个空位，本次创建的快捷方式已放入：\n{folder}",
+                parent=self,
+            )
 
     # ------------------------------------------------------------------ 导出
     def export_csv(self) -> None:
@@ -973,6 +1038,135 @@ class DeskScoutApp(tk.Tk):
                 os.startfile(os.path.dirname(path))
         except OSError as exc:
             messagebox.showwarning("导出失败", str(exc), parent=self)
+
+    # --------------------------------------------------------------- 公告收件箱
+    def _inbox(self) -> list:
+        update = self.cfg.setdefault("update", {})
+        inbox = update.get("inbox")
+        if not isinstance(inbox, list):
+            inbox = []
+            update["inbox"] = inbox
+        return inbox
+
+    def _startup_announcement(self) -> None:
+        """记一次收件箱；升级后首次启动弹一次更新说明，之后不再重复."""
+        current = __version__
+        inbox = self._inbox()
+        known = {str(item.get("version")) for item in inbox if isinstance(item, dict)}
+        if current not in known:
+            inbox.insert(0, {
+                "version": current,
+                "title": announcements.title_for(current),
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "notes": announcements.notes_for(current) or f"DeskScout 已更新到 v{current}。",
+            })
+            del inbox[20:]
+            config.save(self.cfg)
+
+        update = self.cfg.setdefault("update", {})
+        self._update_inbox_button()
+
+        seen = str(update.get("last_seen_version") or "")
+        if not seen:
+            # 首次安装不弹窗，只记住版本
+            update["last_seen_version"] = current
+            config.save(self.cfg)
+            return
+        if seen != current:
+            update["last_seen_version"] = current
+            config.save(self.cfg)
+            self._show_announcement(current)
+
+    def _update_inbox_button(self) -> None:
+        button = getattr(self, "inbox_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(text=f"公告收件箱（{len(self._inbox())}）")
+        except tk.TkError:
+            pass
+
+    def _show_announcement(self, version: str) -> None:
+        notes = announcements.notes_for(version) or f"DeskScout 已更新到 v{version}。"
+        window = tk.Toplevel(self)
+        window.title(announcements.title_for(version))
+        window.configure(bg=CARD)
+        window.geometry("640x500")
+        window.minsize(520, 380)
+        window.transient(self)
+        window.attributes("-topmost", True)
+
+        header = tk.Frame(window, bg=CARD)
+        header.pack(fill="x", padx=20, pady=(18, 0))
+        tk.Label(header, text=f"已更新到 DeskScout v{version}", font=(FONT, 15, "bold"),
+                 bg=CARD, fg=TEXT).pack(anchor="w")
+        tk.Label(header, text=f"{datetime.now():%Y-%m-%d} · 本次更新内容如下，之后可在「设置 → 公告收件箱」回看",
+                 font=(FONT, 9), bg=CARD, fg=MUTED).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Text(window, wrap="word", font=(FONT, 9), bg=SUBTLE, fg=TEXT,
+                       relief="flat", padx=12, pady=10)
+        body.insert("1.0", notes)
+        body.configure(state="disabled")
+        body.pack(fill="both", expand=True, padx=20, pady=12)
+
+        footer = tk.Frame(window, bg=CARD)
+        footer.pack(fill="x", padx=20, pady=(0, 16))
+        ttk.Button(footer, text="查看收件箱", style="Ghost.TButton",
+                   command=lambda: (window.destroy(), self._open_inbox())).pack(side="left")
+        ttk.Button(footer, text="知道了", style="Accent.TButton",
+                   command=window.destroy).pack(side="right")
+
+    def _open_inbox(self) -> None:
+        inbox = self._inbox()
+        window = tk.Toplevel(self)
+        window.title("更新公告收件箱")
+        window.configure(bg=CARD)
+        window.geometry("720x480")
+        window.transient(self)
+
+        tk.Label(window, text="更新公告", font=(FONT, 13, "bold"), bg=CARD, fg=TEXT
+                 ).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(window, text="每次发版的说明都会留在本机，离线也能查看。",
+                 font=(FONT, 9), bg=CARD, fg=MUTED).pack(anchor="w", padx=18)
+
+        content = tk.Frame(window, bg=CARD)
+        content.pack(fill="both", expand=True, padx=18, pady=12)
+
+        listing = tk.Listbox(content, width=24, font=(FONT, 9), bg=SUBTLE, fg=TEXT,
+                             relief="flat", activestyle="none", exportselection=False,
+                             highlightthickness=1, highlightbackground=BORDER)
+        listing.pack(side="left", fill="y")
+        body = tk.Text(content, wrap="word", font=(FONT, 9), bg=SUBTLE, fg=TEXT,
+                       relief="flat", padx=12, pady=10)
+        body.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        body.configure(state="disabled")
+
+        records = [item for item in inbox if isinstance(item, dict)] or [
+            {"version": __version__, "title": announcements.title_for(__version__),
+             "date": datetime.now().strftime("%Y-%m-%d"),
+             "notes": announcements.notes_for(__version__)}
+        ]
+
+        def show_selection(_event=None) -> None:
+            index = listing.curselection()
+            if not index:
+                return
+            record = records[index[0]]
+            body.configure(state="normal")
+            body.delete("1.0", "end")
+            body.insert("1.0", f"v{record.get('version')} · {record.get('date', '')}\n\n"
+                              f"{record.get('notes', '')}")
+            body.configure(state="disabled")
+
+        for record in records:
+            listing.insert("end", f"v{record.get('version')}  {record.get('date', '')}")
+        listing.bind("<<ListboxSelect>>", show_selection)
+        if records:
+            listing.selection_set(0)
+            show_selection()
+
+        ttk.Button(window, text="关闭", style="Ghost.TButton",
+                   command=window.destroy).pack(anchor="e", padx=18, pady=(0, 14))
 
     # ------------------------------------------------------------------ 更新
     def _auto_update_check(self) -> None:

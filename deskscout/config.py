@@ -7,6 +7,7 @@ import json
 import os
 
 APP_DIR_NAME = "DeskScout"
+SCHEMA_VERSION = 2
 
 DEFAULTS: dict = {
     "scan": {
@@ -24,7 +25,7 @@ DEFAULTS: dict = {
     "shortcuts": {
         "mode": "desktop",          # desktop | folder
         "folder_name": "新建快捷方式",
-        "confirm_before_create": True,
+        "confirm_before_create": False,
     },
     "ui": {
         "geometry": "1180x780",
@@ -36,6 +37,8 @@ DEFAULTS: dict = {
         "auto_check": True,
         "last_check": 0,
         "skipped_version": "",
+        "last_seen_version": "",
+        "inbox": [],                # [{version,title,date,notes}] 应用内公告
     },
 }
 
@@ -66,14 +69,23 @@ def load() -> dict:
         with open(config_path(), "r", encoding="utf-8") as handle:
             stored = json.load(handle)
         if isinstance(stored, dict):
-            return _deep_merge(DEFAULTS, stored)
+            merged = _deep_merge(DEFAULTS, stored)
+            # 1.1.0 起“创建前二次确认”默认关闭：老配置里遗留的 True 只做一次性迁移，
+            # 之后用户在设置页的勾选仍然有效。
+            if not stored.get("schema_version"):
+                merged.setdefault("shortcuts", {})["confirm_before_create"] = False
+                merged["schema_version"] = SCHEMA_VERSION
+            return merged
     except (OSError, ValueError):
         pass
-    return copy.deepcopy(DEFAULTS)
+    fresh = copy.deepcopy(DEFAULTS)
+    fresh["schema_version"] = SCHEMA_VERSION
+    return fresh
 
 
 def save(config: dict) -> bool:
     try:
+        config["schema_version"] = SCHEMA_VERSION
         with open(config_path(), "w", encoding="utf-8") as handle:
             json.dump(config, handle, ensure_ascii=False, indent=2)
         return True

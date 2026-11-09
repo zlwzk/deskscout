@@ -62,6 +62,14 @@ def _safe_int(key, name: str) -> int:
         return 0
 
 
+def _expand(path: str) -> str:
+    if not path:
+        return ""
+    text = path.strip().strip('"')
+    expanded = os.path.expandvars(text)
+    return expanded if expanded != text else text
+
+
 def _launch_candidates(folder: str) -> list[str]:
     try:
         entries = list(os.scandir(folder))
@@ -79,11 +87,27 @@ def _launch_candidates(folder: str) -> list[str]:
     return candidates[:200]
 
 
+def _launch_candidates_deep(folder: str) -> list[str]:
+    """安装目录根下没有 exe 时，再看一层常见子目录（bin/app/runtime）. """
+    candidates: list[str] = []
+    try:
+        subdirs = [e for e in os.scandir(folder) if e.is_dir()]
+    except OSError:
+        return candidates
+    for sub in subdirs[:8]:
+        candidates.extend(_launch_candidates(sub.path))
+        if len(candidates) > 200:
+            break
+    return candidates[:200]
+
+
 def _guess_target_from_folder(folder: str, display_name: str) -> str:
     """在安装目录里挑一个最像主程序的 exe（只在找不到 DisplayIcon 时兜底）."""
     if not folder or not os.path.isdir(folder):
         return ""
     candidates = _launch_candidates(folder)
+    if not candidates:
+        candidates = _launch_candidates_deep(folder)
     if not candidates:
         return ""
     tokens = {t for t in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", display_name.casefold()) if len(t) >= 3}
@@ -105,6 +129,40 @@ def _guess_target_from_folder(folder: str, display_name: str) -> str:
         if score > best_score:
             best, best_score = path, score
     return best if best_score >= 2 else ""
+
+
+def _resolve_target(
+    icon_path: str, install_location: str, uninstall_string: str, display_name: str
+) -> str:
+    """依次用 DisplayIcon、安装目录、图标/卸载器所在目录定位主程序."""
+    if (
+        icon_path
+        and os.path.isfile(icon_path)
+        and is_launchable_target(icon_path)
+        and not is_bad_launch_target(icon_path)
+    ):
+        return icon_path
+
+    guess = _guess_target_from_folder(install_location, display_name)
+    if guess:
+        return guess
+
+    extra = []
+    if icon_path:
+        extra.append(os.path.dirname(icon_path))
+    if uninstall_string:
+        uninstall_exe, _ = split_icon_path(uninstall_string)
+        if uninstall_exe and not os.path.basename(uninstall_exe).casefold().startswith("msiexec"):
+            extra.append(os.path.dirname(uninstall_exe))
+    for folder in extra:
+        if not folder or not os.path.isdir(folder):
+            continue
+        if install_location and os.path.normcase(folder) == os.path.normcase(install_location):
+            continue
+        guess = _guess_target_from_folder(folder, display_name)
+        if guess:
+            return guess
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -153,10 +211,12 @@ def _entry_from_uninstall_key(key, subkey_name: str, root, root_path: str) -> Ap
 
     publisher = _safe_string(key, "Publisher")
     version = _safe_string(key, "DisplayVersion")
-    install_location = _safe_string(key, "InstallLocation")
+    install_location = _expand(_safe_string(key, "InstallLocation"))
     uninstall_string = _safe_string(key, "QuietUninstallString") or _safe_string(key, "UninstallString")
     display_icon_raw = _safe_string(key, "DisplayIcon")
     icon_path, icon_index = split_icon_path(display_icon_raw)
+    icon_path = _expand(icon_path)
+    url_info = _expand(_safe_string(key, "URLInfoAbout")) or _expand(_safe_string(key, "URLUpdateInfo"))
     release_type = _safe_string(key, "ReleaseType")
     parent_key = _safe_string(key, "ParentKeyName")
     system_component = _safe_int(key, "SystemComponent")
@@ -188,34 +248,36 @@ def _entry_from_uninstall_key(key, subkey_name: str, root, root_path: str) -> Ap
             note=reason,
         )
 
-    target = ""
-    if (
-        icon_path
-        and os.path.isfile(icon_path)
-        and is_launchable_target(icon_path)
-        and not is_bad_launch_target(icon_path)
-    ):
-        target = icon_path
-    if not target:
-        target = _guess_target_from_folder(install_location, display_name)
+    target = _resolve_target(icon_path, install_location, uninstall_string, display_name)
+    if target and not icon_path:
+        icon_path = target
     confidence = "high" if target else "low"
 
     invalid = False
     note = ""
     if not target:
         note = "未找到可启动的主程序"
-        if install_location and not os.path.isdir(os.path.expandvars(install_location)):
+        expanded_location = _expand(install_location)
+        if install_location and not os.path.isdir(expanded_location):
             invalid = True
             note = "安装目录已不存在（疑似卸载残留）"
         elif uninstall_string and not uninstall_string.casefold().startswith("msiexec"):
             uninstall_exe, _ = split_icon_path(uninstall_string)
-            if uninstall_exe and not os.path.exists(os.path.expandvars(uninstall_exe)):
+            if uninstall_exe and not os.path.exists(_expand(uninstall_exe)):
                 invalid = True
                 note = "卸载程序已缺失（疑似卸载残留）"
 
     category = "user"
     if "steamapps" in (install_location or "").casefold() and "common" in (install_location or "").casefold():
         category = "game"
+
+    source_url = ""
+    if url_info:
+        from .provenance import repo_from_text
+
+        source_url = repo_from_text(url_info)
+        if source_url and not publisher:
+            publisher = source_url
 
     return AppEntry(
         key=f"reg:{root_path}\\{subkey_name}",
@@ -230,6 +292,7 @@ def _entry_from_uninstall_key(key, subkey_name: str, root, root_path: str) -> Ap
         icon_path=icon_path,
         target=target,
         working_dir=os.path.dirname(target) if target else "",
+        source_url=source_url,
         size_bytes=estimated_kb * 1024,
         invalid=invalid,
         note=note,
@@ -367,20 +430,39 @@ try { foreach ($a in Get-StartApps) { $start += [pscustomobject]@{ n = $a.Name; 
 $pkgs = @()
 try {
   foreach ($p in Get-AppxPackage) {
+    if ($p.IsFramework) { continue }
+    if ("$($p.Name)" -match '^Microsoft\.' -or "$($p.Name)" -match '^MicrosoftCorporationII\.' -or "$($p.Name)" -match '^MicrosoftWindows\.') { continue }
+    $apps = @()
+    $disp = ''
+    $pub = ''
+    try {
+      $m = Get-AppxPackageManifest -Package $p
+      foreach ($a in @($m.Package.Applications.Application)) { if ($a.Id) { $apps += [string]$a.Id } }
+      $disp = [string]$m.Package.Properties.DisplayName
+      $pub = [string]$m.Package.Properties.PublisherDisplayName
+    } catch {}
     $pkgs += [pscustomobject]@{
       name = $p.Name; family = $p.PackageFamilyName; publisher = $p.Publisher
       nonremovable = [bool]$p.NonRemovable; sig = "$($p.SignatureKind)"
       version = "$($p.Version)"; loc = $p.InstallLocation; framework = [bool]$p.IsFramework
+      apps = $apps; disp = $disp; pub = $pub
     }
   }
 } catch {}
 $payload = [pscustomobject]@{ start = $start; pkgs = $pkgs }
-$json = $payload | ConvertTo-Json -Depth 4 -Compress
+$json = $payload | ConvertTo-Json -Depth 5 -Compress
 [IO.File]::WriteAllText('__OUT__', $json, [Text.UTF8Encoding]::new($false))
 """
 
+_APPX_JUNK_RE = re.compile(
+    r"(extend|contextmenu|sharehost|shellhost|handler|provider|extension|plugin|"
+    r"service|backgroundtask|protocolhandler|filehandler|appext)",
+    re.IGNORECASE,
+)
+
 _APPX_DENY = re.compile(
-    r"^microsoft\.(windows|net|vclibs|ui|services|hevc|vp9|mpeg|webp|codec|store|"
+    r"^microsoft\.|^microsoftcorporationii\.|^microsoftwindows\.|^windows\.|"
+    r"^(microsoft\.)?(windows|net|vclibs|ui|services|hevc|vp9|mpeg|webp|codec|store|"
     r"xbox|gaming|advertising|mixedreality|officehub|skypeapp|people|photos|"
     r"windowscommunicationsapps|zunemusic|zunevideo|bing|edge|getstarted|"
     r"cortana|yourphone|feedback|teams|wallet|barcode|lockapp|search|shell|"
@@ -423,9 +505,54 @@ def _as_list(value) -> list:
     return [value]
 
 
+def _store_entry(appid: str, name: str, package: dict) -> AppEntry:
+    return AppEntry(
+        key=f"appx:{appid.casefold()}",
+        name=name,
+        version=str(package.get("version", "") or ""),
+        publisher=str(package.get("pub", "") or ""),
+        source="store",
+        category="store",
+        confidence="high",
+        install_location=str(package.get("loc", "") or ""),
+        target=os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe"),
+        arguments=f"shell:AppsFolder\\{appid}",
+        working_dir=os.environ.get("SystemRoot", r"C:\Windows"),
+    )
+
+
+def _package_display_name(package: dict, family: str) -> str:
+    display = str(package.get("disp", "") or "").strip()
+    if display and not display.casefold().startswith("ms-resource:"):
+        return display
+    name = str(package.get("name", "") or family)
+    if "." in name:
+        tail = name.split(".", 1)[1]
+        if tail and not re.fullmatch(r"[0-9A-Fa-f]{6,}", tail):
+            return tail.replace("-", " ").strip()
+    return name
+
+
+def _looks_like_app_name(name: str) -> bool:
+    """包清单兜底项要求是人能看懂的应用名，过滤掉 shell 扩展/后台服务."""
+    text = (name or "").strip()
+    if not text:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return True
+    if _APPX_JUNK_RE.search(text):
+        return False
+    if re.search(r"[a-z][A-Z]", text):
+        return False
+    if " " in text:
+        return True
+    return 3 <= len(text) <= 24
+
+
 def scan_store(progress: Progress = None) -> list[AppEntry]:
     entries: list[AppEntry] = []
-    handle = None
+    payload: dict = {}
+    temp_path = ""
     try:
         fd, temp_path = tempfile.mkstemp(prefix="deskscout_appx_", suffix=".json")
         os.close(fd)
@@ -442,7 +569,7 @@ def scan_store(progress: Progress = None) -> list[AppEntry]:
                 script,
             ],
             capture_output=True,
-            timeout=60,
+            timeout=90,
             creationflags=creationflags,
         )
         with open(temp_path, "r", encoding="utf-8-sig") as handle:
@@ -452,14 +579,28 @@ def scan_store(progress: Progress = None) -> list[AppEntry]:
     finally:
         try:
             os.unlink(temp_path)
-        except (OSError, UnboundLocalError):
+        except (OSError, ValueError):
             pass
 
-    packages = {
-        str(p.get("family", "")).casefold(): p
-        for p in _as_list(payload.get("pkgs"))
-        if isinstance(p, dict)
-    }
+    packages: dict[str, dict] = {}
+    for package in _as_list(payload.get("pkgs")):
+        if not isinstance(package, dict):
+            continue
+        family = str(package.get("family", "") or "").casefold()
+        if family:
+            packages[family] = package
+
+    def allowed(package: dict, family: str) -> bool:
+        if package.get("framework"):
+            return False
+        if _APPX_DENY.search(str(package.get("name", "") or family)):
+            return False
+        signature = str(package.get("sig", "")).casefold()
+        if signature in {"system", "none"} or package.get("nonremovable"):
+            return False
+        return True
+
+    covered: set[str] = set()
     for app in _as_list(payload.get("start")):
         if not isinstance(app, dict):
             continue
@@ -468,29 +609,31 @@ def scan_store(progress: Progress = None) -> list[AppEntry]:
         if not name or "!" not in appid:
             continue
         family = appid.split("!", 1)[0]
-        package = packages.get(family.casefold(), {})
-        if package.get("framework"):
+        key = family.casefold()
+        package = packages.get(key, {})
+        covered.add(key)
+        if not allowed(package, family):
             continue
-        if _APPX_DENY.search(package.get("name", "") or family):
+        if _APPX_JUNK_RE.search(name):
             continue
-        signature = str(package.get("sig", "")).casefold()
-        if signature in {"system", "none"} or package.get("nonremovable"):
+        entries.append(_store_entry(appid, name, package))
+
+    # 包清单里有、但 Get-StartApps 没列出的应用（没有开始菜单入口的商店应用）
+    for key, package in packages.items():
+        if key in covered:
             continue
-        entries.append(
-            AppEntry(
-                key=f"appx:{appid.casefold()}",
-                name=name,
-                version=str(package.get("version", "") or ""),
-                publisher="",
-                source="store",
-                category="store",
-                confidence="high",
-                install_location=str(package.get("loc", "") or ""),
-                target=os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe"),
-                arguments=f"shell:AppsFolder\\{appid}",
-                working_dir=os.environ.get("SystemRoot", r"C:\Windows"),
-            )
-        )
+        family = str(package.get("family", "") or "")
+        if not allowed(package, family):
+            continue
+        apps = [str(a) for a in _as_list(package.get("apps")) if str(a).strip()]
+        if not apps:
+            continue
+        name = _package_display_name(package, family)
+        non_app, _ = is_non_app_entry(name)
+        if non_app or not _looks_like_app_name(name):
+            continue
+        entries.append(_store_entry(f"{family}!{apps[0]}", name, package))
+
     if progress:
         progress(f"Microsoft Store：已读取 {len(entries)} 个应用", 55)
     return entries
