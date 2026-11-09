@@ -119,10 +119,24 @@ def fetch_remote(url: str, timeout: int = 8) -> list[dict]:
 
 
 def merge_inbox(config: dict, remote_items: list[dict]) -> list[str]:
-    """把远端公告并入收件箱；返回本次新增的版本号列表（按新→旧）."""
+    """把远端公告并入收件箱；返回本次新增的版本号列表（按新→旧）.
+
+    内置正文先入档：收件箱既收远端推送，也当历史公告的离线存档。
+    """
     update = config.setdefault("update", {})
     inbox = update.get("inbox") or []
     known = {str(item.get("version", "")) for item in inbox}
+    for version in ANNOUNCEMENTS:
+        if version in known:
+            continue
+        inbox.append({
+            "version": version,
+            "title": title_for(version),
+            "date": "",
+            "notes": ANNOUNCEMENTS[version],
+            "remote": False,
+        })
+        known.add(version)
     added = []
     for item in remote_items:
         version = item.get("version", "")

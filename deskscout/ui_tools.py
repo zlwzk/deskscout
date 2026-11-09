@@ -637,7 +637,7 @@ def sync_announcements(app, silent: bool = False) -> None:
     cfg = app.cfg
 
     def work():
-        return announcements.sync(cfg, timeout=8)
+        return announcements.sync(cfg, timeout=12)
 
     def done(status, payload):
         if status == "err":
